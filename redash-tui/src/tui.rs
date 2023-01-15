@@ -8,21 +8,26 @@ use redash_client::Data;
 
 use crate::app::CommandEntry;
 
-use self::{events::*, input_box::InputBox, renderer::Renderer, selectable_list::SelectableList};
+use self::{
+    events::*, input_box::InputBox, renderer::Renderer, selectable_list::SelectableList,
+    system_bar::SystemBar,
+};
 
 mod renderer;
 
 pub mod events;
 pub mod input_box;
 pub mod selectable_list;
+pub mod system_bar;
 
 pub trait Component<'a> {
     fn render(&self, renderer: &Renderer, position: &Position);
     fn render_focus(&self, window: &Window, position: &Position);
     fn toggle_focus(&mut self);
     fn add_event_listener(&mut self, event: EventType, handler: Rc<RefCell<EventHandler<'a>>>);
-    fn trigger(&mut self, event: &Event);
+    fn trigger(&mut self, event: &Event) -> bool;
     fn get_component_type(&self) -> ComponentType;
+    fn is_focusable(&self) -> bool;
 }
 
 pub struct Position {
@@ -64,26 +69,33 @@ impl<'a> App<'a> {
     pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
         let window = self.window;
         let redis_client = self.redis_client;
+
         let (screen_height, screen_width) = window.get_max_yx();
 
         let input_box = create_cell(InputBox::new(
             "Command",
             ((screen_width as f32) * 0.2_f32).floor() as i32,
         ));
+
         let command_list = create_cell(SelectableList::new(
             "History",
             ((screen_width as f32) * 0.2_f32).floor() as i32,
-            screen_height - 3,
+            screen_height - 4,
             Vec::new(),
             false,
         ));
 
         let result_list = create_cell(SelectableList::new(
             "Result",
-            ((screen_width as f32) * 0.8_f32).floor() as i32 - 1,
-            screen_height,
+            ((screen_width as f32) * 0.8_f32).floor() as i32,
+            screen_height - 1,
             Vec::new(),
             true,
+        ));
+
+        let system_bar = create_cell(SystemBar::new(
+            "q: exit, i/a: enter insert mode on command input, esc: exit insert mode: tab: cycle through panel",
+            screen_width,
         ));
 
         let input_box_cloned = input_box.clone();
@@ -107,8 +119,9 @@ impl<'a> App<'a> {
                                     {
                                         match &result {
                                             Data::Array(array) => {
-                                                for data in array {
-                                                    result_lst.append_items(format!("{data}"))
+                                                for (idx, data) in array.iter().enumerate() {
+                                                    result_lst
+                                                        .append_items(format!("{idx}. {data}"));
                                                 }
                                             }
 
@@ -120,12 +133,11 @@ impl<'a> App<'a> {
                                         command: command.clone(),
                                         response: result,
                                     });
+                                    a.append_items(command);
+                                    a.next_item();
                                 }
                                 Err(err) => result_lst.append_items(format!("{err}")),
                             }
-
-                            a.append_items(command);
-                            a.next_item();
                         }
                         _ => {}
                     }
@@ -180,24 +192,26 @@ impl<'a> App<'a> {
         self.add_component(command_list, Position::new(3, 0))?;
         self.add_component(
             result_list,
-            Position::new(0, ((screen_width as f32) * 0.2_f32).floor() as i32 + 2),
+            Position::new(0, ((screen_width as f32) * 0.2_f32).floor() as i32),
         )?;
+        self.add_component(system_bar, Position::new(screen_height - 1, 0))?;
         Ok(())
     }
 
-    pub fn handle_input(&mut self, input: Input) -> Result<(), Box<dyn Error>> {
+    pub fn handle_input(&mut self, input: Input) -> Result<bool, Box<dyn Error>> {
         match input {
-            Input::Character('\t') => self.focus_next(),
+            Input::Character('\t') => {
+                self.focus_next();
+                Ok(true)
+            }
             Input::KeyBackspace | Input::KeyUp | Input::KeyDown | Input::KeyEnter => {
-                self.trigger_event(&Event::new(EventType::KeyPress, EventData::Key(input)))?
+                self.trigger_event(&Event::new(EventType::KeyPress, EventData::Key(input)))
             }
             Input::Character(c) => {
-                self.trigger_event(&Event::new(EventType::KeyPress, EventData::Char(c)))?
+                self.trigger_event(&Event::new(EventType::KeyPress, EventData::Char(c)))
             }
-            _ => (),
+            _ => Ok(false),
         }
-
-        Ok(())
     }
     fn add_component(
         &mut self,
@@ -234,15 +248,16 @@ impl<'a> App<'a> {
         })
     }
 
-    pub fn trigger_event(&mut self, event: &Event) -> Result<(), Box<dyn Error>> {
+    pub fn trigger_event(&mut self, event: &Event) -> Result<bool, Box<dyn Error>> {
+        let mut event_handled = false;
         for component in &mut self.components {
             let c = component.0.clone();
 
             let mut c = c.try_borrow_mut()?;
-            c.trigger(event)
+            event_handled |= c.trigger(event);
         }
 
-        Ok(())
+        Ok(event_handled)
     }
 
     pub fn focus_next(&mut self) {
@@ -260,7 +275,13 @@ impl<'a> App<'a> {
         self.current_focus = (self.current_focus + 1) % total_component;
         let current_focus = self.components[self.current_focus].0.clone();
         match current_focus.try_borrow_mut() {
-            Ok(mut c) => c.toggle_focus(),
+            Ok(mut c) => {
+                if c.is_focusable() {
+                    c.toggle_focus()
+                } else {
+                    self.focus_next()
+                }
+            }
             Err(_) => (),
         };
     }
@@ -274,7 +295,17 @@ pub fn run(redis_client: &Client, window: &Window) -> Result<(), Box<dyn Error>>
         app.render();
         match window.getch() {
             Some(Input::KeyDC) => break,
-            Some(input) => app.handle_input(input)?,
+            Some(input @ Input::Character('q' | 'Q')) => {
+                let event_handled = app.handle_input(input)?;
+                if !event_handled {
+                    break;
+                }
+            }
+            Some(input) => {
+                if let Err(err) = app.handle_input(input) {
+                    return Err(err);
+                }
+            }
             None => (),
         }
     }

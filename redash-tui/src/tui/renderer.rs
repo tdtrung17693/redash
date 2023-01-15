@@ -1,4 +1,6 @@
-use pancurses::{Window, A_BOLD, A_ITALIC, A_NORMAL};
+use pancurses::{Window, A_BOLD, A_ITALIC, A_NORMAL, COLOR_PAIR};
+
+use crate::constants::FOCUS_COLOR;
 
 pub struct Renderer<'a> {
     window: &'a Window,
@@ -91,33 +93,56 @@ impl<'a> Renderer<'a> {
             width,
             height,
         }: &RenderBox,
-        scroll_top: i32,
+        scroll_percent: f64,
     ) {
         let window = self.window;
         let signed_top = top as i32;
         let signed_left = left as i32;
+        let scroll_handler_y = (scroll_percent * ((height - 2) as f64)) as i32;
+
         window.mv(signed_top, signed_left + width as i32);
         window.addstr("↟");
-        window.mv(signed_top + scroll_top + 1, signed_left);
+        window.mv(signed_top + scroll_handler_y + 1, signed_left);
         window.addstr("█");
-        window.mv(signed_top + height as i32, signed_left);
+        window.mv((top + height) as i32, signed_left);
         window.addstr("↡");
     }
 
-    pub fn draw_string(&self, string: &str, text_style: TextStyle, render_box: &RenderBox) {
-        let &RenderBox { top, left, .. } = render_box;
+    pub fn draw_string(
+        &self,
+        string: &str,
+        text_style: TextStyle,
+        is_focus: bool,
+        render_box: &RenderBox,
+    ) {
+        let &RenderBox {
+            top, left, width, ..
+        } = render_box;
         let window = self.window;
         let signed_top = top as i32;
         let signed_left = left as i32;
-        let attr = match text_style {
+        let text_weight_attr = match text_style {
             TextStyle::Bold => A_BOLD,
             TextStyle::Normal => A_NORMAL,
             TextStyle::Italic => A_ITALIC,
         };
-        let old_attr = window.attrget();
-        window.attrset(attr);
+        let mut attr_flag = text_weight_attr;
+        if is_focus {
+            attr_flag |= COLOR_PAIR(FOCUS_COLOR);
+        }
+        let mut string = String::from(string);
+        let len = string.len();
+        if len > width {
+            // ellipsis if width >= 1
+            if width >= 1 {
+                string = format!("{}{}", &string[..width], "…");
+            } else {
+                string = String::new();
+            }
+        }
+        window.attron(attr_flag);
         window.mv(signed_top, signed_left);
         window.addstr(string);
-        window.attrset(old_attr.0);
+        window.attroff(attr_flag);
     }
 }

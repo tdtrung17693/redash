@@ -38,7 +38,9 @@ impl Client {
         if self.stream.borrow().is_none() {
             return Err(RedashError::OperationError(String::from("no_connection")));
         }
-
+        if command.len() == 0 {
+            return Err(RedashError::OperationError(String::from("empty command")));
+        }
         let msg = format!("{command}\r\n");
         let msg = msg.as_bytes();
         let stream = self.stream.borrow_mut();

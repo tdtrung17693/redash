@@ -3,8 +3,8 @@ use super::{
     renderer::{RenderBox, TextStyle},
     Component, ComponentType, Event, EventHandler, EventType, Position,
 };
-use pancurses::{Input, Window};
-use std::{cell::RefCell, fmt::Debug, rc::Rc};
+use pancurses::{curs_set, Input, Window};
+use std::{cell::RefCell, cmp::min, rc::Rc};
 use std::{cmp::max, collections::HashMap, fmt::Display};
 
 /// Input box
@@ -24,7 +24,7 @@ pub struct SelectableList<'a, T: Display> {
     event_listeners: HashMap<EventType, Vec<Rc<RefCell<EventHandler<'a>>>>>,
 }
 
-impl<'a, T: Display + Debug> SelectableList<'a, T> {
+impl<'a, T: Display> SelectableList<'a, T> {
     pub fn new(label: &str, width: i32, height: i32, items: Vec<T>, is_disabled: bool) -> Self {
         SelectableList {
             label: String::from(label),
@@ -52,24 +52,36 @@ impl<'a, T: Display + Debug> SelectableList<'a, T> {
         self.items = Vec::new()
     }
 
+    pub fn set_scroll(&mut self, scroll_top: i32) {
+        self.viewport_top = scroll_top;
+    }
+
     pub fn next_item(&mut self) {
-        if (self.value as usize) < self.items.len() - 1 {
-            self.value += 1;
+        // if disabled, just scroll through page instead of through item
+        let delta = if self.is_disabled { self.height - 1 } else { 1 };
+        let len = self.items.len() as i32;
+        self.value = min(self.value + delta, len - 1);
+
+        if self.value >= self.viewport_top + self.height - 2 {
+            self.set_scroll(self.viewport_top + 1);
         }
-        if self.value - self.viewport_top > self.height - 3 {
-            self.viewport_top += 1;
+
+        if !self.is_disabled {
+            self.value_changed();
         }
-        self.value_changed();
     }
 
     pub fn prev_item(&mut self) {
-        if self.value > 0 {
-            self.value -= 1;
-        }
+        let delta = if self.is_disabled { self.height - 1 } else { 1 };
+        self.value = max(0, self.value - delta);
+
         if self.value < self.viewport_top {
-            self.viewport_top -= 1;
+            self.set_scroll(self.viewport_top - 1);
         }
-        self.value_changed();
+
+        if !self.is_disabled {
+            self.value_changed();
+        }
     }
 
     fn value_changed(&mut self) {
@@ -84,13 +96,11 @@ impl<'a, T: Display + Debug> SelectableList<'a, T> {
                     EventData::Number(self.value),
                 ))
             }
-        } else {
-            println!("no handler");
         }
     }
 }
 
-impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
+impl<'a, T: Display> Component<'a> for SelectableList<'a, T> {
     fn render(&self, renderer: &super::renderer::Renderer, position: &Position) {
         let &Position { top, left } = position;
         renderer.draw_box(&RenderBox {
@@ -102,10 +112,11 @@ impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
         renderer.draw_string(
             &self.label,
             TextStyle::Normal,
+            self.is_focus,
             &RenderBox {
                 top: top as usize,
                 left: left as usize + 2,
-                width: 0,
+                width: (self.width - 2) as usize,
                 height: 0,
             },
         );
@@ -134,14 +145,15 @@ impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
             &self.items[..]
         };
         if self.is_overflow() {
+            let len = self.items.len() as i32;
             renderer.draw_vscrollbar(
                 &RenderBox {
                     top: (top + 1) as usize,
                     left: (left + self.width - 1) as usize,
                     width: 0,
-                    height: self.height as usize - 3,
+                    height: (self.height - 3) as usize,
                 },
-                self.viewport_top,
+                ((self.viewport_top) as f64) / (((len as i32) - self.height + 2) as f64),
             )
         }
         for (index, item) in rendering_items.iter().enumerate() {
@@ -151,13 +163,15 @@ impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
             } else {
                 TextStyle::Normal
             };
+
             renderer.draw_string(
                 &format!("{item}"),
                 style,
+                false,
                 &RenderBox {
                     top: (top + 1 + index) as usize,
                     left: (left + 1) as usize,
-                    width: 0,
+                    width: (self.width - 3) as usize,
                     height: 0,
                 },
             );
@@ -170,12 +184,13 @@ impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
         }
         let &Position { top, left } = position;
 
+        curs_set(0);
         window.mv(top + 1 + self.value - self.viewport_top, left + 1);
     }
 
-    fn trigger(&mut self, event: &Event) {
-        if !self.is_focus || self.is_disabled {
-            return;
+    fn trigger(&mut self, event: &Event) -> bool {
+        if !self.is_focus {
+            return false;
         }
 
         if let Event {
@@ -184,9 +199,15 @@ impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
         } = event
         {
             match event_data {
-                EventData::Key(Input::KeyUp) => self.prev_item(),
-                EventData::Key(Input::KeyDown) => self.next_item(),
-                _ => return,
+                EventData::Key(Input::KeyUp) => {
+                    self.prev_item();
+                    return true;
+                }
+                EventData::Key(Input::KeyDown) => {
+                    self.next_item();
+                    return true;
+                }
+                _ => return false,
             }
         } else if let Event {
             event_type: EventType::Focus,
@@ -194,7 +215,10 @@ impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
         } = event
         {
             self.is_focus = true;
+            return true;
         }
+
+        return false;
     }
 
     fn add_event_listener(
@@ -212,5 +236,9 @@ impl<'a, T: Display + Debug> Component<'a> for SelectableList<'a, T> {
 
     fn get_component_type(&self) -> super::ComponentType {
         ComponentType::SelectableList
+    }
+
+    fn is_focusable(&self) -> bool {
+        return true;
     }
 }

@@ -6,10 +6,13 @@ pub enum EventType {
     KeyPress,
     Submit,
     ValueChange,
+    ChangeInputMode,
 }
+
 pub enum ComponentType {
     InputBox,
     SelectableList,
+    SystemBar,
 }
 
 #[derive(Debug, PartialEq, Hash, Eq, Clone)]
@@ -17,6 +20,7 @@ pub enum EventData {
     Char(char),
     String(String),
     Number(i32),
+    Bool(bool),
     Key(Input),
 }
 
@@ -46,10 +50,3 @@ impl Event {
 }
 
 pub type EventHandler<'a> = dyn FnMut(Event) + 'a;
-// pub trait EventTrait {
-//     type EventData<'a>
-//     where
-//         Self: 'a;
-
-//     fn get_data<'a>(&'a self) -> &Self::EventData<'a>;
-// }
